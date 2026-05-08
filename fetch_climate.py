@@ -70,22 +70,12 @@ WIND_DIR = {
 }
 
 COLUMNS = [
-    "Timestamp (UTC)", "Timestamp (Lisbon)", "Station",
+    "Timestamp (UTC)", "Station",
     "Temperature (°C)", "Humidity (%)", "Precipitation (mm)",
     "Wind Speed (km/h)", "Wind Speed (m/s)", "Wind Direction",
     "Pressure (hPa)", "Radiation (W/m²)"
 ]
 
-def utc_to_lisbon(ts_str):
-    """Convert IPMA UTC timestamp to Lisbon local time (handles DST)."""
-    dt = datetime.datetime.strptime(ts_str, "%Y-%m-%dT%H:%M")
-    year = dt.year
-    march31 = datetime.datetime(year, 3, 31)
-    dst_start = march31 - datetime.timedelta(days=(march31.weekday() + 1) % 7)
-    oct31 = datetime.datetime(year, 10, 31)
-    dst_end = oct31 - datetime.timedelta(days=(oct31.weekday() + 1) % 7)
-    offset = 1 if dst_start <= dt < dst_end else 0
-    return (dt + datetime.timedelta(hours=offset)).strftime("%Y-%m-%dT%H:%M")
 
 # ---------------------------------------------------------------------------
 # STEP 1 — Find nearest station
@@ -129,7 +119,6 @@ for ts in all_timestamps:
         continue
     new_records.append({
         "Timestamp (UTC)":    ts,
-        "Timestamp (Lisbon)": utc_to_lisbon(ts),
         "Station":            best_name,
         "Temperature (°C)":   clean(sd.get("temperatura")),
         "Humidity (%)":       clean(sd.get("humidade")),
@@ -166,7 +155,7 @@ THIN_BORDER = Border(
     bottom=Side(style="thin", color="B8CCE4"),
     right =Side(style="thin", color="B8CCE4"),
 )
-COL_WIDTHS  = [20, 20, 22, 16, 14, 18, 18, 16, 16, 14, 16]
+COL_WIDTHS  = [20, 22, 16, 14, 18, 18, 16, 16, 14, 16]
 
 def style_row(ws, row_idx, record, is_gap=False):
     fill = GAP_FILL if is_gap else (ALT_FILL if (row_idx % 2 == 0) else None)
