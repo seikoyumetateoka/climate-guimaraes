@@ -26,6 +26,10 @@ TARGET_LAT  = 41.4434
 TARGET_LON  = -8.2938
 TARGET_NAME = "Guimarães"
 
+# Fallback station for precipitation (Guimarães station 1210625 has no precip sensor)
+# 1210881 is the nearest station that reliably reports precAcumulada
+PRECIP_FALLBACK_ID = None  # will be found automatically at runtime
+
 IPMA_STATIONS_URL = "https://api.ipma.pt/open-data/observation/meteorology/stations/stations.json"
 IPMA_OBS_URL      = "https://api.ipma.pt/open-data/observation/meteorology/stations/observations.json"
 
@@ -101,13 +105,52 @@ for feature in stations:
 print("Nearest station: {} (ID: {}) — {:.1f} km".format(best_name, best_id, best_dist))
 
 # ---------------------------------------------------------------------------
+# STEP 1b — Find nearest station with valid precipitation sensor
+# ---------------------------------------------------------------------------
+# Build a lookup of all stations by id
+station_coords = {}
+for feature in stations:
+    props  = feature.get("properties", {})
+    coords = feature.get("geometry", {}).get("coordinates", [])
+    if not coords or len(coords) < 2: continue
+    sid = str(props.get("idEstacao", ""))
+    station_coords[sid] = (float(coords[1]), float(coords[0]), props.get("localEstacao", sid))
+
+# ---------------------------------------------------------------------------
 # STEP 2 — Fetch observations
 # ---------------------------------------------------------------------------
 print("Fetching observations...")
 obs_data = fetch_json(IPMA_OBS_URL)
 
-# Build list of all 24 expected hours from the API timestamps
+# Find nearest station with valid precip data from the latest timestamp
 all_timestamps = sorted(obs_data.keys())
+latest_ts = all_timestamps[-1]
+precip_station_id   = best_id   # default to main station
+precip_station_name = best_name
+precip_best_dist    = float("inf")
+
+for sid, sdata in obs_data[latest_ts].items():
+    if sdata is None: continue
+    prec = sdata.get("precAcumulada")
+    if prec is None: continue
+    try:
+        if float(prec) == NO_DATA: continue
+    except (ValueError, TypeError):
+        continue
+    if sid in station_coords:
+        slat, slon, sname = station_coords[sid]
+        dist = haversine(TARGET_LAT, TARGET_LON, slat, slon)
+        if dist < precip_best_dist:
+            precip_best_dist    = dist
+            precip_station_id   = sid
+            precip_station_name = sname
+
+if precip_station_id != best_id:
+    print("Precipitation from nearest reporting station: {} (ID: {}) — {:.1f} km".format(
+        precip_station_name, precip_station_id, precip_best_dist
+    ))
+else:
+    print("Main station reports precipitation — no fallback needed.")
 
 new_records = []
 missing_hours = []
@@ -122,7 +165,7 @@ for ts in all_timestamps:
         "Station":            best_name,
         "Temperature (°C)":   clean(sd.get("temperatura")),
         "Humidity (%)":       clean(sd.get("humidade")),
-        "Precipitation (mm)": clean(sd.get("precAcumulada")),
+        "Precipitation (mm)": clean(obs_data[ts].get(precip_station_id, {}).get("precAcumulada") if obs_data[ts].get(precip_station_id) else None),
         "Wind Speed (km/h)":  clean(sd.get("intensidadeVentoKM")),
         "Wind Speed (m/s)":   clean(sd.get("intensidadeVento")),
         "Wind Direction":     WIND_DIR.get(sd.get("idDireccVento"), ""),
