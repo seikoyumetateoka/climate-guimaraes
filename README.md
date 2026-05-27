@@ -38,17 +38,6 @@ climate-guimaraes/
 - Go to Actions tab → "Fetch Climate Data" → Run workflow
 - After ~30 seconds, `data/climate_guimaraes.xlsx` will appear in your repo
 
-### 5. Sync to your PC
-Install Git and run once:
-```
-git clone https://github.com/YOUR_USERNAME/climate-guimaraes.git
-```
-Then every time you want the latest file:
-```
-git pull
-```
-The Excel file will be at `data/climate_guimaraes.xlsx` on your PC.
-
 ## Data fields
 | Column | Description |
 |--------|-------------|
