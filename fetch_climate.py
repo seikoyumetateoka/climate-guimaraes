@@ -2,22 +2,23 @@
 """
 Daily IPMA climate data fetcher for GitHub Actions.
 Appends the last 24h of hourly observations for the nearest
-station to Guimarães to a master Excel file.
+station to Guimarães to a master CSV file.
 Runs headless — no pyrevit, no GUI, no ctypes.
+
+OUTPUT: data/climate_guimaraes.csv  (UTF-8, header on row 1)
+  - On the FIRST run, if the CSV does not exist yet but the old
+    climate_guimaraes.xlsx does, all history is migrated from the
+    xlsx into the CSV so nothing is lost.
+  - After that, new hours are appended to the CSV daily.
+  - The old xlsx is never written again (frozen backup).
 """
 
 import os
+import csv
 import json
 import math
 import datetime
 import urllib.request
-
-try:
-    import openpyxl
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    from openpyxl.utils import get_column_letter
-except ImportError:
-    raise ImportError("Run: pip install openpyxl")
 
 # ---------------------------------------------------------------------------
 # CONFIG
@@ -34,7 +35,8 @@ IPMA_STATIONS_URL = "https://api.ipma.pt/open-data/observation/meteorology/stati
 IPMA_OBS_URL      = "https://api.ipma.pt/open-data/observation/meteorology/stations/observations.json"
 
 DATA_DIR   = "data"
-EXCEL_FILE = os.path.join(DATA_DIR, "climate_guimaraes.xlsx")
+CSV_FILE   = os.path.join(DATA_DIR, "climate_guimaraes.csv")
+XLSX_FILE  = os.path.join(DATA_DIR, "climate_guimaraes.xlsx")  # old file — read once for migration only
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -184,116 +186,111 @@ if not new_records:
     exit(0)
 
 # ---------------------------------------------------------------------------
-# STEP 3 — Append to (or create) master Excel file
+# STEP 3 - Write to CSV  (with one-time migration from the old xlsx)
 # ---------------------------------------------------------------------------
-HEADER_FILL = PatternFill("solid", start_color="2F5496", end_color="2F5496")
-HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-DATA_FONT   = Font(name="Arial", size=10)
-ALT_FILL    = PatternFill("solid", start_color="DCE6F1", end_color="DCE6F1")
-GAP_FILL    = PatternFill("solid", start_color="FFE699", end_color="FFE699")  # yellow for gaps
-GAP_FONT    = Font(name="Arial", size=10, italic=True, color="7F6000")
-CENTER      = Alignment(horizontal="center", vertical="center")
-LEFT        = Alignment(horizontal="left",   vertical="center")
-THIN_BORDER = Border(
-    bottom=Side(style="thin", color="B8CCE4"),
-    right =Side(style="thin", color="B8CCE4"),
-)
-COL_WIDTHS  = [20, 22, 16, 14, 18, 18, 16, 16, 14, 16]
 
-def style_row(ws, row_idx, record, is_gap=False):
-    fill = GAP_FILL if is_gap else (ALT_FILL if (row_idx % 2 == 0) else None)
-    font = GAP_FONT if is_gap else DATA_FONT
-    for col_idx, col_name in enumerate(COLUMNS, start=1):
-        c = ws.cell(row=row_idx, column=col_idx, value=record.get(col_name))
-        c.font = font; c.alignment = CENTER; c.border = THIN_BORDER
-        if fill: c.fill = fill
+def _ts_str(v):
+    """Normalise a timestamp cell to the IPMA ISO string format."""
+    if v is None:
+        return ""
+    if hasattr(v, "strftime"):
+        return v.strftime("%Y-%m-%dT%H:%M")
+    return str(v)
 
-if os.path.exists(EXCEL_FILE):
-    wb = openpyxl.load_workbook(EXCEL_FILE)
+
+def migrate_xlsx_to_csv(xlsx_path, csv_path):
+    """
+    One-time migration: read all history from the old xlsx (header on row 3,
+    data from row 4) and write it into a fresh CSV with the header on row 1.
+    Uses openpyxl, which is available on the GitHub Actions runner.
+    """
+    import openpyxl
+    wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=True)
     ws = wb["Hourly Data"]
+    n = 0
+    # utf-8-sig writes a BOM so Excel opens the degree/accent characters correctly
+    with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(COLUMNS)
+        for r in range(4, ws.max_row + 1):
+            vals = [ws.cell(row=r, column=ci).value for ci in range(1, len(COLUMNS) + 1)]
+            if vals[0] is None:           # no timestamp -> not a data row
+                continue
+            vals[0] = _ts_str(vals[0])    # normalise the timestamp
+            writer.writerow(["" if v is None else v for v in vals])
+            n += 1
+    wb.close()
+    return n
 
-    # Collect existing timestamps to avoid duplicates
-    existing_ts = set()
-    for row in ws.iter_rows(min_row=4, max_col=1, values_only=True):
-        if row[0]:
-            existing_ts.add(row[0])
 
-    next_row = ws.max_row + 1
-    appended = 0
-    skipped  = 0
+def read_existing_timestamps(csv_path):
+    """Collect timestamps already in the CSV, to avoid duplicates."""
+    existing = set()
+    if not os.path.exists(csv_path):
+        return existing
+    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        ts_idx = 0
+        if header:
+            for i, h in enumerate(header):
+                if "timestamp" in str(h).lower():
+                    ts_idx = i
+                    break
+        for row in reader:
+            if row and len(row) > ts_idx and str(row[ts_idx]).strip():
+                existing.add(str(row[ts_idx]).strip())
+    return existing
 
-    # Append real records
+
+def row_values(record):
+    """Turn a record dict into a list matching COLUMNS order."""
+    out = []
+    for col in COLUMNS:
+        v = record.get(col)
+        out.append("" if v is None else v)
+    return out
+
+
+# --- 3a. Seed the CSV on first run -----------------------------------------
+if not os.path.exists(CSV_FILE):
+    if os.path.exists(XLSX_FILE):
+        moved = migrate_xlsx_to_csv(XLSX_FILE, CSV_FILE)
+        print("First run: migrated {} historical rows from xlsx into the new CSV.".format(moved))
+    else:
+        with open(CSV_FILE, "w", encoding="utf-8-sig", newline="") as f:
+            csv.writer(f).writerow(COLUMNS)
+        print("First run: created a new CSV with header (no xlsx found to migrate).")
+
+# --- 3b. Append new records + gap rows -------------------------------------
+existing_ts = read_existing_timestamps(CSV_FILE)
+
+appended = skipped = gaps_added = 0
+# append mode uses plain utf-8 (no BOM) so we don't insert a BOM mid-file
+with open(CSV_FILE, "a", encoding="utf-8", newline="") as f:
+    writer = csv.writer(f)
+
     for record in new_records:
-        if record["Timestamp (UTC)"] in existing_ts:
+        ts = record["Timestamp (UTC)"]
+        if ts in existing_ts:
             skipped += 1
             continue
-        style_row(ws, next_row, record)
-        next_row += 1
+        writer.writerow(row_values(record))
+        existing_ts.add(ts)
         appended += 1
 
-    # Append gap rows (yellow) for missing hours
     for ts in missing_hours:
         if ts in existing_ts:
             continue
-        style_row(ws, next_row, {
+        writer.writerow(row_values({
             "Timestamp (UTC)": ts,
             "Station": best_name,
             "Temperature (°C)": "NO DATA",
-        }, is_gap=True)
-        next_row += 1
+        }))
+        existing_ts.add(ts)
+        gaps_added += 1
 
-    print("{} rows appended, {} duplicates skipped.".format(appended, skipped))
-
-else:
-    print("Creating new Excel file...")
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Hourly Data"
-
-    # Title
-    ws.merge_cells("A1:J1")
-    c = ws["A1"]
-    c.value     = "IPMA Climate Data — {} — Continuous Log".format(TARGET_NAME)
-    c.font      = Font(name="Arial", bold=True, size=13, color="1F3864")
-    c.alignment = CENTER
-    c.fill      = PatternFill("solid", start_color="BDD7EE", end_color="BDD7EE")
-    ws.row_dimensions[1].height = 24
-
-    # Subtitle
-    ws.merge_cells("A2:J2")
-    c = ws["A2"]
-    c.value     = (
-        "Source: IPMA open-data API  |  Station: {} (ID: {})  |  {:.1f} km from {}  |"
-        "  Auto-updated daily via GitHub Actions  |  Yellow rows = station reported no data"
-    ).format(best_name, best_id, best_dist, TARGET_NAME)
-    c.font      = Font(name="Arial", size=9, italic=True, color="595959")
-    c.alignment = LEFT
-
-    # Headers
-    for col_idx, col_name in enumerate(COLUMNS, start=1):
-        c = ws.cell(row=3, column=col_idx, value=col_name)
-        c.font = HEADER_FONT; c.fill = HEADER_FILL; c.alignment = CENTER
-    ws.row_dimensions[3].height = 20
-
-    # Data rows
-    for row_idx, record in enumerate(new_records, start=4):
-        style_row(ws, row_idx, record)
-
-    # Gap rows
-    for ts in missing_hours:
-        row_idx = ws.max_row + 1
-        style_row(ws, row_idx, {
-            "Timestamp (UTC)": ts,
-            "Station": best_name,
-            "Temperature (°C)": "NO DATA",
-        }, is_gap=True)
-
-    # Column widths
-    for i, w in enumerate(COL_WIDTHS, start=1):
-        ws.column_dimensions[get_column_letter(i)].width = w
-
-    ws.freeze_panes = "A4"
-
-wb.save(EXCEL_FILE)
-print("Saved to {}".format(EXCEL_FILE))
+print("{} rows appended, {} duplicates skipped, {} gap rows added.".format(
+    appended, skipped, gaps_added))
+print("Saved to {}".format(CSV_FILE))
 print("Done!")
