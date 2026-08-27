@@ -46,7 +46,13 @@ os.makedirs(DATA_DIR, exist_ok=True)
 def fetch_json(url):
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "Mozilla/5.0 GitHubActions ClimateMonitor/1.0"}
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/126.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
+        }
     )
     response = urllib.request.urlopen(req, timeout=15)
     return json.loads(response.read().decode("utf-8"))
